@@ -1,8 +1,16 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(mobile_harness_native C ASM)
 
-if(NOT ANDROID_ABI STREQUAL "arm64-v8a")
-    message(FATAL_ERROR "Mobile Harness currently supports only arm64-v8a")
+if(NOT ANDROID_ABI STREQUAL "arm64-v8a" AND NOT ANDROID_ABI STREQUAL "armeabi-v7a")
+    message(FATAL_ERROR "Mobile Harness supports only arm64-v8a and armeabi-v7a")
+endif()
+
+if(ANDROID_ABI STREQUAL "armeabi-v7a")
+    set(PROOTLOADER_TEXT_ADDRESS "0x200000")
+    set(PROOTLOADER_WORKAROUND_OPTION "")
+else()
+    set(PROOTLOADER_TEXT_ADDRESS "0x2000000000")
+    set(PROOTLOADER_WORKAROUND_OPTION ",-u,pokedata_workaround")
 endif()
 
 set(PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../..")
@@ -76,7 +84,7 @@ target_include_directories(prootloader PRIVATE "${PROOT_ROOT}")
 target_compile_options(prootloader PRIVATE -fPIC -ffreestanding)
 target_link_options(prootloader PRIVATE
     -static -nostdlib
-    "-Wl,--build-id=none,--rosegment,-Ttext=0x2000000000,-z,noexecstack,-u,pokedata_workaround"
+    "-Wl,--build-id=none,--rosegment,-Ttext=${PROOTLOADER_TEXT_ADDRESS},-z,noexecstack${PROOTLOADER_WORKAROUND_OPTION}"
 )
 set_target_properties(prootloader PROPERTIES OUTPUT_NAME "prootloader-bin" SUFFIX "")
 
@@ -86,6 +94,7 @@ add_custom_command(
         "-DREADELF=${CMAKE_READELF}"
         "-DLOADER=$<TARGET_FILE:prootloader>"
         "-DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/loader-info.c"
+        "-DANDROID_ABI=${ANDROID_ABI}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/GenerateLoaderInfo.cmake"
     DEPENDS prootloader "${CMAKE_CURRENT_SOURCE_DIR}/GenerateLoaderInfo.cmake"
     VERBATIM

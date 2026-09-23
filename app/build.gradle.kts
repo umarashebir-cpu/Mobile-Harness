@@ -77,12 +77,17 @@ android {
         targetSdk = if (playBuild) 36 else 28
         // Keep literal defaults so F-Droid's static manifest parser can detect
         // the tagged release. Gradle properties may still override Play builds.
-        versionCode = 7
-        versionName = "1.0.6"
+        versionCode = 8
+        versionName = "1.0.7"
         providers.gradleProperty("appVersionCode").orNull?.toIntOrNull()?.let { versionCode = it }
         providers.gradleProperty("appVersionName").orNull?.let { versionName = it }
 
-        ndk.abiFilters += listOf("armeabi-v7a", "arm64-v8a")
+        val targetAbi = providers.gradleProperty("targetAbi").orNull
+        if (targetAbi == null) {
+            ndk.abiFilters += listOf("armeabi-v7a", "arm64-v8a")
+        } else {
+            ndk.abiFilters += targetAbi
+        }
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true

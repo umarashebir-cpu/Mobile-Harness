@@ -53,6 +53,9 @@ private data class RuntimeBundle(
 )
 
 class RuntimeInstaller(private val context: Context) {
+    private val isArm32Runtime = android.os.Build.SUPPORTED_ABIS.any { it.equals("armeabi-v7a", ignoreCase = true) }
+    private val expectedRootfsVersion: String
+        get() = if (isArm32Runtime) ROOTFS_ARMHF_VERSION else ROOTFS_ARM64_VERSION
     private val runtimeDir = File(context.filesDir, "runtime")
     private val rootfs = File(runtimeDir, "ubuntu")
     private val downloads = File(context.cacheDir, "runtime-downloads")
@@ -81,8 +84,8 @@ class RuntimeInstaller(private val context: Context) {
         val ready = rootfsLayoutReady &&
             proot.canExecute() &&
             File(rootfs, "usr/bin/bash").exists() &&
-            rootfsMarker.readTextOrNull() == ROOTFS_VERSION &&
-            File(rootfs, "usr/local/bin/node").exists() &&
+            rootfsMarker.readTextOrNull() == expectedRootfsVersion &&
+            (File(rootfs, "usr/local/bin/node").exists() || File(rootfs, "usr/bin/node").exists()) &&
             (legacyLanguageTools || coreToolsReady) &&
             coreReadyMarker.exists()
         if (ready) repairLegacyMacosMetadata()
@@ -106,7 +109,7 @@ class RuntimeInstaller(private val context: Context) {
 
     /** Returns the already verified runtime without performing network or update checks. */
     fun installedRuntime(): InstalledRuntime {
-        check(isInstalled()) { "Core runtime setup is incomplete. Reopen Mobile Harness to repair it." }
+        check(isInstalled()) { "Core runtime setup is incomplete. Reopen UMAR and Usman to repair it." }
         return InstalledRuntime(
             proot = File(context.applicationInfo.nativeLibraryDir, "libproot.so"),
             rootfs = rootfs,
@@ -142,19 +145,19 @@ class RuntimeInstaller(private val context: Context) {
         onProgress: suspend (RuntimeInstallProgress) -> Unit,
     ): InstalledRuntime {
         require(
-            supportsArm64Runtime(
+            supportsNativeRuntime(
                 android.os.Build.SUPPORTED_ABIS,
                 System.getProperty("os.arch"),
             ),
-        ) { "Unsupported architecture: Mobile Harness requires an ARM64 device or ARM64 emulator" }
+        ) { "Unsupported architecture: UMAR and Usman requires an ARM32 or ARM64 ARM device" }
         val proot = File(context.applicationInfo.nativeLibraryDir, "libproot.so")
         require(proot.canExecute()) { "The embedded PRoot launcher is unavailable" }
 
-        if (!File(rootfs, "usr/bin/bash").exists() || rootfsMarker.readTextOrNull() != ROOTFS_VERSION) {
+        if (!File(rootfs, "usr/bin/bash").exists() || rootfsMarker.readTextOrNull() != expectedRootfsVersion) {
             onProgress(RuntimeInstallProgress("Preparing the private development runtime", 0.03f))
             val archive = obtainRuntimeBundle(
-                CORE_BUNDLE,
-                preferEmbedded = BuildConfig.OFFLINE_RUNTIME_BUNDLES,
+                if (isArm32Runtime) CORE_BUNDLE_ARMHF else CORE_BUNDLE,
+                preferEmbedded = BuildConfig.OFFLINE_RUNTIME_BUNDLES && !isArm32Runtime,
                 from = 0.03f,
                 to = 0.25f,
                 onProgress,
@@ -163,8 +166,12 @@ class RuntimeInstaller(private val context: Context) {
             val staging = File(runtimeDir, "ubuntu.installing")
             staging.deleteRecursively()
             staging.mkdirs()
-            extractZstdTar(archive, staging)
+            if (archive.name.endsWith(".tar.gz")) extractRootfs(archive, staging) else extractZstdTar(archive, staging)
             stripMacosMetadataArtifacts(staging)
+            if (isArm32Runtime) {
+                File(staging, ".pocket-rootfs-version").writeText(expectedRootfsVersion)
+                File(staging, ".pocket-runtime-ready").writeText("1")
+            }
             require(File(staging, "usr/bin/bash").isFile) { "Core bundle is missing Bash" }
             rootfs.deleteRecursively()
             check(staging.renameTo(rootfs)) { "Could not activate the Linux environment" }
@@ -754,7 +761,11 @@ class RuntimeInstaller(private val context: Context) {
                 verifyGuest(proot, "node --version && npm --version", "Node.js tools could not be verified")
             }
             DevStack.PYTHON -> {
-                installRuntimeOverlay(PYTHON_BUNDLE, "Installing Python, pip, and venv", from, to, onProgress)
+                if (isArm32Runtime) {
+                    aptInstall(proot, listOf("python3", "python3-pip", "python3-venv"), "Installing 32-bit ARM Python, pip, and venv", from, onProgress)
+                } else {
+                    installRuntimeOverlay(PYTHON_BUNDLE, "Installing Python, pip, and venv", from, to, onProgress)
+                }
                 runCatching {
                     verifyGuest(proot, "python3 --version && pip3 --version", "Python tools could not be verified")
                 }.onFailure { error ->
@@ -958,7 +969,7 @@ class RuntimeInstaller(private val context: Context) {
             return destination
         }
 
-        val url = "${BuildConfig.RUNTIME_RELEASE_BASE_URL}/${bundle.fileName}"
+        val url = if (bundle.fileName == ROOTFS_ARMHF_FILE) ROOTFS_ARMHF_URL else "${BuildConfig.RUNTIME_RELEASE_BASE_URL}/${bundle.fileName}"
         downloadVerified(url, destination, bundle.sha256) { downloaded, total ->
             val ratio = if (total > 0) downloaded.toFloat() / total else 0f
             onProgress(RuntimeInstallProgress("Downloading ${bundle.label} bundle", from + ratio * (to - from), downloaded, total.takeIf { it > 0 }))
@@ -1128,7 +1139,12 @@ class RuntimeInstaller(private val context: Context) {
         to: Float,
         onProgress: suspend (RuntimeInstallProgress) -> Unit,
     ) {
-        if (File(rootfs, "usr/local/bin/node").exists()) return
+        if (File(rootfs, "usr/local/bin/node").exists() || File(rootfs, "usr/bin/node").exists()) return
+        if (isArm32Runtime) {
+            aptInstall(proot, listOf("nodejs", "npm"), "Installing 32-bit ARM Node.js and npm", from, onProgress)
+            verifyGuest(proot, "node --version && npm --version", "32-bit Node.js tools could not be verified")
+            return
+        }
         onProgress(RuntimeInstallProgress("Downloading Node.js $NODE_VERSION LTS", from))
         downloads.mkdirs()
         val nodeFileName = "node-$NODE_VERSION-linux-arm64.tar.gz"
@@ -1831,10 +1847,14 @@ printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decis
         private const val GITHUB_CLI_RELEASE_SHA256 = "ea4e7a581a32ccad6cc7923cb1576ac5859ba4b9a16ab22eb8f8a96e78e2e961"
         private const val LEGACY_README = "# Pocket Dev project\n\nThis project is managed locally on Android.\n"
         private const val LEGACY_INDEX = "<!doctype html><title>Pocket Dev</title><h1>Hello from Android</h1>\n"
-        private const val ROOTFS_VERSION = "ubuntu-20.04.5-arm64"
-        private const val ROOTFS_FILE = "ubuntu-base-20.04.5-base-arm64.tar.gz"
-        private const val ROOTFS_URL = "https://cdimage.ubuntu.com/ubuntu-base/releases/20.04/release/$ROOTFS_FILE"
-        private const val ROOTFS_SHA256 = "f9b999afb4c4b10193087ea8c11be36d688f19e609b05179b571f29357954b52"
+        private const val ROOTFS_ARM64_VERSION = "ubuntu-20.04.5-arm64"
+        private const val ROOTFS_ARM64_FILE = "ubuntu-base-20.04.5-base-arm64.tar.gz"
+        private const val ROOTFS_ARM64_URL = "https://cdimage.ubuntu.com/ubuntu-base/releases/20.04/release/$ROOTFS_ARM64_FILE"
+        private const val ROOTFS_ARM64_SHA256 = "f9b999afb4c4b10193087ea8c11be36d688f19e609b05179b571f29357954b52"
+        private const val ROOTFS_ARMHF_VERSION = "ubuntu-20.04.5-armhf"
+        private const val ROOTFS_ARMHF_FILE = "ubuntu-base-20.04.5-base-armhf.tar.gz"
+        private const val ROOTFS_ARMHF_URL = "https://cdimage.ubuntu.com/ubuntu-base/releases/20.04/release/$ROOTFS_ARMHF_FILE"
+        private const val ROOTFS_ARMHF_SHA256 = "6bcbfa7f603d79d368d40e138dad98938907d2fb0d6416521417cf8702c2f5de"
         private const val NODE_VERSION = "v24.19.0"
         private const val LANGUAGE_TOOLS_VERSION = "node-v24.19.0-python3-v1"
         private const val CORE_TOOLS_VERSION = "core-bundle-2026.09.5"
@@ -1855,6 +1875,12 @@ printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decis
         /** Pinned DeepSeek Harness release installed via npm inside the guest (verified 2026-09-06). */
         const val DSH_VERSION = "0.1.2-rc.1"
         private const val DSH_ANDROID_COMPATIBILITY_VERSION = "copyfile-excl-v1"
+        private val CORE_BUNDLE_ARMHF = RuntimeBundle(
+            label = "Ubuntu ARM32 core",
+            fileName = ROOTFS_ARMHF_FILE,
+            sha256 = ROOTFS_ARMHF_SHA256,
+            compressedBytes = 23_818_379L,
+        )
         private val CORE_BUNDLE = RuntimeBundle(
             label = "Core",
             fileName = "pocketdev-core-arm64-2026.09.5.tar.zst",

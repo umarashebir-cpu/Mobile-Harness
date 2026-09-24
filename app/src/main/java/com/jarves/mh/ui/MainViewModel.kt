@@ -51,7 +51,7 @@ import com.jarves.mh.runtime.RuntimeSetupController
 import com.jarves.mh.runtime.RuntimeSetupService
 import com.jarves.mh.runtime.RuntimeSetupSnapshot
 import com.jarves.mh.runtime.RuntimeSetupStatus
-import com.jarves.mh.runtime.supportsArm64Runtime
+import com.jarves.mh.runtime.supportsNativeRuntime
 import com.jarves.mh.runtime.AndroidAppInstaller
 import com.jarves.mh.update.AppUpdateInfo
 import com.jarves.mh.update.AppUpdater
@@ -985,11 +985,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun bootstrap() {
-        if (!supportsArm64Runtime(android.os.Build.SUPPORTED_ABIS, System.getProperty("os.arch"))) {
+        if (!supportsNativeRuntime(android.os.Build.SUPPORTED_ABIS, System.getProperty("os.arch"))) {
             _state.update {
                 it.copy(
                     startupStage = StartupStage.SETUP_REQUIRED,
-                    startupMessage = "ARM64 device required",
+                    startupMessage = "A native ARM32 or ARM64 device is required",
                     startupError = null,
                     startupErrorIsOffline = false,
                 )
@@ -1255,7 +1255,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val message = if (isOffline) {
             "Connect to Wi-Fi or mobile data, then try again. Internet is required to finish the first-time setup."
         } else {
-            error.message?.take(300) ?: "Something went wrong while preparing Mobile Harness. Please try again."
+            error.message?.take(300) ?: "Something went wrong while preparing UMAR and Usman. Please try again."
         }
         _state.update {
             it.copy(

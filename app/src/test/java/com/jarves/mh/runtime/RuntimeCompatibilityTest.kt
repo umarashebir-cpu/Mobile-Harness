@@ -7,17 +7,17 @@ import org.junit.Test
 class RuntimeCompatibilityTest {
     @Test
     fun acceptsNativeArm64Android() {
-        assertTrue(supportsArm64Runtime(arrayOf("arm64-v8a", "armeabi-v7a"), "aarch64"))
+        assertTrue(supportsNativeRuntime(arrayOf("arm64-v8a", "armeabi-v7a"), "aarch64"))
     }
 
     @Test
-    fun rejectsX8664EvenWhenTranslationAdvertisesArm64() {
-        assertFalse(supportsArm64Runtime(arrayOf("arm64-v8a", "x86_64"), "x86_64"))
+    fun acceptsNativeArm32Android() {
+        assertTrue(supportsNativeRuntime(arrayOf("armeabi-v7a"), "armv7l"))
     }
 
     @Test
-    fun rejectsDevicesWithoutArm64Abi() {
-        assertFalse(supportsArm64Runtime(arrayOf("x86_64", "x86"), "x86_64"))
-        assertFalse(supportsArm64Runtime(arrayOf("armeabi-v7a"), "armv7l"))
+    fun rejectsNonArmAndMissingArmAbi() {
+        assertFalse(supportsNativeRuntime(arrayOf("arm64-v8a", "x86_64"), "x86_64"))
+        assertFalse(supportsNativeRuntime(arrayOf("x86_64", "x86"), "x86_64"))
     }
 }

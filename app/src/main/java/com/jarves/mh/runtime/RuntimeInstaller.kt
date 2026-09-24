@@ -6,6 +6,7 @@ import android.system.Os
 import com.jarves.mh.BuildConfig
 import java.io.BufferedInputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.net.HttpURLConnection
@@ -167,12 +168,16 @@ class RuntimeInstaller(private val context: Context) {
             staging.deleteRecursively()
             staging.mkdirs()
             if (archive.name.endsWith(".tar.gz")) extractRootfs(archive, staging) else extractZstdTar(archive, staging)
+            normalizeExtractedRootfs(staging)
             stripMacosMetadataArtifacts(staging)
             if (isArm32Runtime) {
                 File(staging, ".pocket-rootfs-version").writeText(expectedRootfsVersion)
                 File(staging, ".pocket-runtime-ready").writeText("1")
             }
-            require(File(staging, "usr/bin/bash").isFile) { "Core bundle is missing Bash" }
+            require(File(staging, "usr/bin/bash").isFile) {
+                logExtractedTree(staging, "Core bundle is missing Bash after extraction")
+                "Core bundle is missing Bash"
+            }
             rootfs.deleteRecursively()
             check(staging.renameTo(rootfs)) { "Could not activate the Linux environment" }
             check(ensureRootfsCompatibilityLinks()) { "Core runtime has an invalid Linux filesystem layout" }
@@ -996,12 +1001,49 @@ class RuntimeInstaller(private val context: Context) {
             return destination
         }
 
-        val url = if (bundle.fileName == ROOTFS_ARMHF_FILE) ROOTFS_ARMHF_URL else "${BuildConfig.RUNTIME_RELEASE_BASE_URL}/${bundle.fileName}"
-        downloadVerified(url, destination, bundle.sha256) { downloaded, total ->
-            val ratio = if (total > 0) downloaded.toFloat() / total else 0f
-            onProgress(RuntimeInstallProgress("Downloading ${bundle.label} bundle", from + ratio * (to - from), downloaded, total.takeIf { it > 0 }))
+        if (bundle.fileName == ROOTFS_ARMHF_FILE) {
+            try {
+                downloadVerified(ROOTFS_ARMHF_URL, destination, ROOTFS_ARMHF_SHA256) { downloaded, total ->
+                    val ratio = if (total > 0) downloaded.toFloat() / total else 0f
+                    onProgress(RuntimeInstallProgress("Downloading verified ARMHF core runtime", from + ratio * (to - from), downloaded, total.takeIf { it > 0 }))
+                }
+                validateArmhfArchive(destination)
+            } catch (primary: Exception) {
+                android.util.Log.e("RuntimeInstaller", "Primary ARMHF runtime failed; using Ubuntu 22.04 ARMHF fallback", primary)
+                destination.delete()
+                downloadVerified(ROOTFS_ARMHF_FALLBACK_URL, destination, ROOTFS_ARMHF_FALLBACK_SHA256) { downloaded, total ->
+                    val ratio = if (total > 0) downloaded.toFloat() / total else 0f
+                    onProgress(RuntimeInstallProgress("Downloading verified ARMHF fallback runtime", from + ratio * (to - from), downloaded, total.takeIf { it > 0 }))
+                }
+                validateArmhfArchive(destination)
+            }
+        } else {
+            val url = "${BuildConfig.RUNTIME_RELEASE_BASE_URL}/${bundle.fileName}"
+            downloadVerified(url, destination, bundle.sha256) { downloaded, total ->
+                val ratio = if (total > 0) downloaded.toFloat() / total else 0f
+                onProgress(RuntimeInstallProgress("Downloading ${bundle.label} bundle", from + ratio * (to - from), downloaded, total.takeIf { it > 0 }))
+            }
         }
         return destination
+    }
+
+    private fun validateArmhfArchive(archive: File) {
+        FileInputStream(archive).use { input ->
+            val magic = ByteArray(4)
+            check(input.read(magic) == 4 && magic.contentEquals(byteArrayOf(0x1f, 0x8b.toByte(), 0x08, 0x00))) {
+                "ARMHF runtime is not a gzip archive; possible HTML error response"
+            }
+        }
+        var hasBash = false
+        TarArchiveInputStream(GzipCompressorInputStream(BufferedInputStream(archive.inputStream()))).use { tar ->
+            var entry = tar.nextEntry
+            while (entry != null) {
+                val name = entry.name.removePrefix("./").trimEnd('/')
+                if (name == "usr/bin/bash" || name.endsWith("/usr/bin/bash")) hasBash = true
+                entry = tar.nextEntry
+            }
+        }
+        check(hasBash) { "ARMHF runtime archive has no usr/bin/bash" }
     }
 
     private suspend fun installZipAsset(
@@ -1436,9 +1478,12 @@ class RuntimeInstaller(private val context: Context) {
                     Os.symlink(destination, link.absolutePath)
                 }
             }
-            File(rootfs, "usr/bin/env").canExecute() &&
+            val loader = if (isArm32Runtime) "lib/arm-linux-gnueabihf/ld-linux-armhf.so.3" else "lib/ld-linux-aarch64.so.1"
+            val valid = File(rootfs, "usr/bin/env").canExecute() &&
                 File(rootfs, "usr/bin/bash").canExecute() &&
-                File(rootfs, "lib/ld-linux-aarch64.so.1").exists()
+                File(rootfs, loader).exists()
+            if (!valid) logExtractedTree(rootfs, "Linux runtime layout check failed; expected $loader")
+            valid
         }.onFailure {
             android.util.Log.e("RuntimeInstaller", "Could not repair Linux compatibility links", it)
         }.getOrDefault(false)
@@ -1652,6 +1697,39 @@ printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decis
         val dns = manager.getLinkProperties(manager.activeNetwork)?.dnsServers.orEmpty()
         val servers = dns.mapNotNull { it.hostAddress }.ifEmpty { listOf("8.8.8.8", "1.1.1.1") }
         File(rootfs, "etc/resolv.conf").writeText(servers.joinToString("\n") { "nameserver $it" } + "\n")
+    }
+
+    private fun normalizeExtractedRootfs(destination: File) {
+        if (File(destination, "usr/bin/bash").isFile) return
+        val candidates = destination.listFiles().orEmpty().filter { it.isDirectory }.flatMap { first ->
+            buildList {
+                add(first)
+                first.listFiles().orEmpty().filter { it.isDirectory }.forEach(::add)
+            }
+        }
+        val wrapper = candidates.firstOrNull { File(it, "usr/bin/bash").isFile } ?: return
+        android.util.Log.w("RuntimeInstaller", "Normalizing nested rootfs folder: ${wrapper.relativeTo(destination)}")
+        wrapper.listFiles().orEmpty().forEach { child ->
+            val target = File(destination, child.name)
+            if (target.exists() || java.nio.file.Files.isSymbolicLink(target.toPath())) target.deleteRecursively()
+            check(child.renameTo(target)) { "Could not move nested rootfs entry ${child.name}" }
+        }
+        if (wrapper.listFiles().isNullOrEmpty()) wrapper.delete()
+    }
+
+    private fun logExtractedTree(root: File, reason: String) {
+        val entries = buildList {
+            val queue = ArrayDeque<Pair<File, Int>>()
+            queue.add(root to 0)
+            while (queue.isNotEmpty() && size < 120) {
+                val (current, depth) = queue.removeFirst()
+                current.listFiles().orEmpty().sortedBy { it.name }.forEach { child ->
+                    add(child.relativeTo(root).path + if (child.isDirectory) "/" else "")
+                    if (child.isDirectory && depth < 3 && !java.nio.file.Files.isSymbolicLink(child.toPath())) queue.add(child to depth + 1)
+                }
+            }
+        }
+        android.util.Log.e("RuntimeInstaller", "$reason; extracted entries=${entries.joinToString(", ")}")
     }
 
     private fun extractRootfs(archive: File, destination: File) {
@@ -1882,6 +1960,9 @@ printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decis
         private const val ROOTFS_ARMHF_FILE = "ubuntu-base-20.04.5-base-armhf.tar.gz"
         private const val ROOTFS_ARMHF_URL = "https://cdimage.ubuntu.com/ubuntu-base/releases/20.04/release/$ROOTFS_ARMHF_FILE"
         private const val ROOTFS_ARMHF_SHA256 = "6bcbfa7f603d79d368d40e138dad98938907d2fb0d6416521417cf8702c2f5de"
+        private const val ROOTFS_ARMHF_FALLBACK_FILE = "ubuntu-base-22.04.5-base-armhf.tar.gz"
+        private const val ROOTFS_ARMHF_FALLBACK_URL = "https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/$ROOTFS_ARMHF_FALLBACK_FILE"
+        private const val ROOTFS_ARMHF_FALLBACK_SHA256 = "fd77cb0659326b75c08ce06b6b8649d2e13ef9a704a8e9212fec32cb97d42add"
         private const val NODE_VERSION = "v24.19.0"
         private const val LANGUAGE_TOOLS_VERSION = "node-v24.19.0-python3-v1"
         private const val CORE_TOOLS_VERSION = "core-bundle-2026.09.5"

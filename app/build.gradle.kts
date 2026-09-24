@@ -53,6 +53,8 @@ fun buildConfigString(value: String): String =
 
 android {
     namespace = "com.jarves.mh"
+    // AndroidX activity/core 1.10/1.15 require compileSdk 35+; keep the
+    // install/runtime policy at targetSdk 34 for modern Android behavior.
     compileSdk = 36
     // F-Droid's r26b recipe installs 26.1.10909125. Keep AGP from selecting
     // its newer default NDK; local developers may override this explicitly.
@@ -72,13 +74,13 @@ android {
     defaultConfig {
         applicationId = "com.jarves.mh"
         minSdk = 28
-        // The direct APK retains the proven target-28 PRoot execution path. The
-        // Play build targets current Android while its runtime path is validated.
-        targetSdk = if (playBuild) 36 else 28
+        // Target API 34 avoids Android's outdated-app install warning while
+        // retaining the API 28 runtime floor used by the application.
+        targetSdk = 34
         // Keep literal defaults so F-Droid's static manifest parser can detect
         // the tagged release. Gradle properties may still override Play builds.
-        versionCode = 8
-        versionName = "1.0.7"
+        versionCode = 9
+        versionName = "1.0.8"
         providers.gradleProperty("appVersionCode").orNull?.toIntOrNull()?.let { versionCode = it }
         providers.gradleProperty("appVersionName").orNull?.let { versionName = it }
 

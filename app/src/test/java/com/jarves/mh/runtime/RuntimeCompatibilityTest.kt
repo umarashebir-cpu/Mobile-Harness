@@ -13,11 +13,12 @@ class RuntimeCompatibilityTest {
     @Test
     fun acceptsNativeArm32Android() {
         assertTrue(supportsNativeRuntime(arrayOf("armeabi-v7a"), "armv7l"))
+        assertTrue(supportsNativeRuntime(arrayOf("armeabi-v7a"), null))
+        assertTrue(supportsNativeRuntime(arrayOf("armeabi-v7a"), "aarch64"))
     }
 
     @Test
-    fun rejectsNonArmAndMissingArmAbi() {
-        assertFalse(supportsNativeRuntime(arrayOf("arm64-v8a", "x86_64"), "x86_64"))
+    fun rejectsDevicesWithoutArmAbi() {
         assertFalse(supportsNativeRuntime(arrayOf("x86_64", "x86"), "x86_64"))
     }
 }

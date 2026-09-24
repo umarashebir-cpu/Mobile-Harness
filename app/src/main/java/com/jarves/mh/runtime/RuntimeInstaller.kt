@@ -215,10 +215,21 @@ class RuntimeInstaller(private val context: Context) {
             applyStack(proot, stack, from, from + slice, onProgress)
         }
 
-        when (agent) {
-            com.jarves.mh.model.AgentKind.CLAUDE_CODE -> ensureClaudeInstalled(proot, 0.985f, onProgress)
-            com.jarves.mh.model.AgentKind.DEEPSEEK_HARNESS -> ensureDshInstalled(proot, 0.985f, onProgress)
-            com.jarves.mh.model.AgentKind.ANTIGRAVITY -> ensureAgyInstalled(proot, 0.985f, onProgress)
+        try {
+            when (agent) {
+                com.jarves.mh.model.AgentKind.CLAUDE_CODE -> ensureClaudeInstalled(proot, 0.985f, onProgress)
+                com.jarves.mh.model.AgentKind.DEEPSEEK_HARNESS -> ensureDshInstalled(proot, 0.985f, onProgress)
+                com.jarves.mh.model.AgentKind.ANTIGRAVITY -> ensureAgyInstalled(proot, 0.985f, onProgress)
+            }
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            onProgress(
+                RuntimeInstallProgress(
+                    "${agent.title} was skipped on this device: ${error.message?.take(140) ?: "ARM64-only binary unavailable"}",
+                    0.995f,
+                ),
+            )
         }
         onProgress(RuntimeInstallProgress("Setup complete", 1f))
         return InstalledRuntime(proot, rootfs)
@@ -234,10 +245,17 @@ class RuntimeInstaller(private val context: Context) {
         onProgress: suspend (RuntimeInstallProgress) -> Unit,
     ) {
         val runtime = installedRuntime()
-        when (agent) {
-            com.jarves.mh.model.AgentKind.CLAUDE_CODE -> ensureClaudeInstalled(runtime.proot, 0.05f, onProgress)
-            com.jarves.mh.model.AgentKind.DEEPSEEK_HARNESS -> ensureDshInstalled(runtime.proot, 0.05f, onProgress)
-            com.jarves.mh.model.AgentKind.ANTIGRAVITY -> ensureAgyInstalled(runtime.proot, 0.05f, onProgress)
+        try {
+            when (agent) {
+                com.jarves.mh.model.AgentKind.CLAUDE_CODE -> ensureClaudeInstalled(runtime.proot, 0.05f, onProgress)
+                com.jarves.mh.model.AgentKind.DEEPSEEK_HARNESS -> ensureDshInstalled(runtime.proot, 0.05f, onProgress)
+                com.jarves.mh.model.AgentKind.ANTIGRAVITY -> ensureAgyInstalled(runtime.proot, 0.05f, onProgress)
+            }
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            onProgress(RuntimeInstallProgress("${agent.title} was skipped: ${error.message?.take(140) ?: "binary unavailable on this ABI"}", 1f))
+            return
         }
         onProgress(RuntimeInstallProgress("${agent.title} is ready", 1f))
     }
@@ -278,6 +296,10 @@ class RuntimeInstaller(private val context: Context) {
     /** Installs GitHub's official ARM64 CLI on demand; it is not bundled in the APK. */
     suspend fun ensureGitHubCliInstalled(onProgress: suspend (RuntimeInstallProgress) -> Unit) {
         if (isGitHubCliInstalled()) return
+        if (isArm32Runtime) {
+            onProgress(RuntimeInstallProgress("GitHub CLI skipped: the official release has no ARM32 binary", 1f))
+            return
+        }
         check(!BuildConfig.OFFLINE_RUNTIME_BUNDLES) {
             "GitHub sign-in needs the PocketDev online APK."
         }
@@ -779,7 +801,12 @@ class RuntimeInstaller(private val context: Context) {
                 }
             }
             DevStack.ANDROID -> {
-                installAndroidToolchain(proot, from, to, onProgress)
+                if (isArm32Runtime) {
+                    verified = false
+                    onProgress(RuntimeInstallProgress("Android SDK skipped: the bundled SDK tools are ARM64-only", to))
+                } else {
+                    installAndroidToolchain(proot, from, to, onProgress)
+                }
             }
             DevStack.CPP -> {
                 aptInstall(
